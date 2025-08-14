@@ -1,0 +1,15 @@
+[project]
+name = "kgtest"
+version = "0.1.0"
+description = "Interactive Knowledge Graph Generator with Claude AI and Neo4j"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.28.0",
+    "neo4j>=5.0.0",
+    "pandas>=2.0.0",
+    "streamlit-agraph>=0.0.45",
+    "anthropic>=0.25.0",
+    "python-dotenv>=1.0.0",
+    "plotly>=5.0.0",
+]

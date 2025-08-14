@@ -1,0 +1,33 @@
+services:
+  neo4j:
+    image: neo4j:latest
+    volumes:
+        - /$HOME/neo4j/logs:/logs
+        - /$HOME/neo4j/config:/config
+        - /$HOME/neo4j/data:/data
+        - /$HOME/neo4j/plugin:/plugins
+    environment:
+        - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}
+        - NEO4J_apoc_export_file_enabled=true
+        - NEO4J_apoc_import_file_enabled=true
+        - NEO4J_apoc_import_file_use_neo4j_config=true
+        - NEO4J_PLUGINS=["apoc", "graph-data-science"]
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    restart: always
+
+  streamlit:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    depends_on:
+      - neo4j
+    restart: always
+    # secrets:
+    #   - neo4j_auth_file
+# secrets:
+#   neo4j_auth_file:
+#     file: ./neo4j_auth.txt

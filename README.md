@@ -369,4 +369,4 @@ For issues, questions, or contributions:
 
 ---
 
-Built with ❤️ using Claude AI, Neo4j, and Streamlit
+Built with ❤️ using Neo4j, and Streamlit

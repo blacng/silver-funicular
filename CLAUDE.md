@@ -166,9 +166,17 @@ NEO4J_PASSWORD=your_neo4j_password
 - **Path Analysis**: Native Cypher shortest path with proper error handling and type safety
 
 ### Development Workflow
-- **Make Commands**: Added infrastructure management with `make infrastructure-up/down/restart/logs`
+- **Make Commands**: Added infrastructure management with `make up/down/restart/logs`
 - **Detached Mode**: Docker containers run in background for improved development workflow
 - **Containerized Development**: Complete Docker setup for consistent cross-platform development
-- **Dependency Management** always use uv for dependency management and virtual environments. do not use pip directly.
-- use uv to run python files.
+- **Dependency Management**: Always use uv for dependency management and virtual environments. Do not use pip directly.
+- **Running Python files**: Use uv to run python files.
+
+## Git Commit Guidelines
+
+When creating commits:
+- Do NOT include "Co-Authored-By: Claude" or any AI attribution in commit messages
+- Do NOT include the "🤖 Generated with Claude Code" footer
+- Keep commit messages professional and concise
+- Follow conventional commit format: `type: description`
 - Make sure the Neo4j syntax conform with Neo4j 5.0. Use the skills.md file in the project directory as a guide.

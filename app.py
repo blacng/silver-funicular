@@ -343,8 +343,9 @@ def generate_knowledge_graph(user_input, api_key):
         """
         
         response = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-sonnet-4-5-20250929",
             max_tokens=2000,
+            system="You are a seasoned knowledge graph engineer at a fortune 500 company.",
             messages=[{"role": "user", "content": prompt}]
         )
         

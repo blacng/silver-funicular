@@ -1,39 +1,39 @@
-.PHONY: help infrastructure-up infrastructure-down infrastructure-restart infrastructure-logs clean
+.PHONY: help up down restart logs clean neo4j app
 
 # Default target - show available commands
 help:
 	@echo "Knowledge Graph Generator - Available Commands:"
 	@echo ""
-	@echo "Infrastructure Management:"
-	@echo "  make infrastructure-up      - Start all services (Neo4j + Streamlit)"
-	@echo "  make infrastructure-down    - Stop all services"
-	@echo "  make infrastructure-restart - Restart all services"
-	@echo "  make infrastructure-logs    - Show service logs"
+	@echo "Infrastructure:"
+	@echo "  make up       - Start all services (Neo4j + Streamlit)"
+	@echo "  make down     - Stop all services"
+	@echo "  make restart  - Restart all services"
+	@echo "  make logs     - Show service logs"
+	@echo "  make clean    - Remove containers and images"
 	@echo ""
-	@echo "Development:"
-	@echo "  make clean                  - Remove containers and images"
-	@echo "  make neo4j-browser          - Open Neo4j browser"
-	@echo "  make app                    - Open Streamlit app"
+	@echo "Quick Access:"
+	@echo "  make neo4j    - Open Neo4j browser"
+	@echo "  make app      - Open Streamlit app"
 	@echo ""
 
 # Start infrastructure
-infrastructure-up:
+up:
 	@echo "🚀 Starting Knowledge Graph Generator infrastructure..."
 	docker-compose up --build -d
-	@echo "✅ Services started in background. Use 'make infrastructure-logs' to view logs."
+	@echo "✅ Services started in background. Use 'make logs' to view logs."
 	@echo "🌐 Streamlit app: http://localhost:8501"
 	@echo "🌐 Neo4j browser: http://localhost:7474"
 
 # Stop infrastructure
-infrastructure-down:
+down:
 	@echo "🛑 Stopping Knowledge Graph Generator infrastructure..."
 	docker-compose down
 
 # Restart infrastructure
-infrastructure-restart: infrastructure-down infrastructure-up
+restart: down up
 
 # Show logs
-infrastructure-logs:
+logs:
 	@echo "📋 Showing service logs..."
 	docker-compose logs -f
 
@@ -43,7 +43,7 @@ clean:
 	docker-compose down --rmi all --volumes --remove-orphans
 
 # Quick links (open in default browser)
-neo4j-browser:
+neo4j:
 	@echo "🌐 Opening Neo4j Browser..."
 	@open http://localhost:7474 || xdg-open http://localhost:7474 || echo "Please open http://localhost:7474 manually"
 

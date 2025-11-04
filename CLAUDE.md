@@ -33,23 +33,23 @@ This is a comprehensive Streamlit application called "Interactive Knowledge Grap
 make help
 
 # Start all services (Neo4j + Streamlit)
-make infrastructure-up
+make up
 
 # Stop all services
-make infrastructure-down
+make down
 
 # Restart all services
-make infrastructure-restart
+make restart
 
 # View service logs
-make infrastructure-logs
+make logs
 
 # Clean up all Docker resources
 make clean
 
 # Quick browser shortcuts
-make neo4j-browser  # Opens http://localhost:7474
-make app           # Opens http://localhost:8501
+make neo4j  # Opens http://localhost:7474
+make app    # Opens http://localhost:8501
 ```
 
 ### Direct Commands (Alternative)
@@ -171,3 +171,4 @@ NEO4J_PASSWORD=your_neo4j_password
 - **Containerized Development**: Complete Docker setup for consistent cross-platform development
 - **Dependency Management** always use uv for dependency management and virtual environments. do not use pip directly.
 - use uv to run python files.
+- Make sure the Neo4j syntax conform with Neo4j 5.0. Use the skills.md file in the project directory as a guide.

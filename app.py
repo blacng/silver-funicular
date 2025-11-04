@@ -19,7 +19,7 @@ st.set_page_config(
     page_title="Knowledge Graph Generator",
     page_icon="🕸️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # Initialize session state
@@ -100,7 +100,8 @@ class Neo4jConnection:
             with self.driver.session() as session:
                 result = session.run("""
                     MATCH (meta:GraphMeta)
-                    RETURN meta.name as name, meta.description as description, 
+                    WHERE meta.created_date IS NOT NULL
+                    RETURN meta.name as name, meta.description as description,
                            meta.created_date as created_date, meta.node_count as node_count,
                            meta.edge_count as edge_count
                     ORDER BY meta.created_date DESC
@@ -140,51 +141,57 @@ class Neo4jConnection:
             return [], [], str(e)
     
     def analyze_graph_centrality(self, graph_name):
-        """Calculate centrality metrics for nodes in the graph using Cypher"""
+        """Calculate centrality metrics for nodes in the graph using modern Cypher"""
         try:
             with self.driver.session() as session:
-                # Calculate degree centrality using Cypher
+                # Calculate degree centrality using modern COUNT{} subquery pattern
                 degree_result = session.run("""
                     MATCH (n:KGNode {graph_name: $graph_name})
-                    OPTIONAL MATCH (n)-[r:RELATED {graph_name: $graph_name}]-()
-                    WITH n, count(r) as degree_centrality
-                    RETURN n.id as node_id, 
+                    WITH n,
+                         count{(n)-[:RELATED {graph_name: $graph_name}]-()} as degree_centrality
+                    RETURN n.id as node_id,
                            n.label as label,
                            degree_centrality
                     ORDER BY degree_centrality DESC
                 """, graph_name=graph_name)
-                
+
                 degree_data = [record.data() for record in degree_result]
-                
-                # Calculate a simple betweenness approximation
-                # (Full betweenness is complex, so we'll use a simpler metric)
+
+                # Calculate betweenness approximation using modern subquery patterns
+                # Counts 2-hop paths passing through each node
                 betweenness_result = session.run("""
                     MATCH (n:KGNode {graph_name: $graph_name})
-                    OPTIONAL MATCH path = (a:KGNode {graph_name: $graph_name})-[*2]-(b:KGNode {graph_name: $graph_name})
-                    WHERE n IN nodes(path) AND a <> b AND a <> n AND b <> n
-                    WITH n, count(DISTINCT path) as betweenness_approximation
+                    WITH n,
+                         count{
+                             MATCH path = (a:KGNode {graph_name: $graph_name})-[:RELATED*2]-(b:KGNode {graph_name: $graph_name})
+                             WHERE n IN nodes(path) AND a <> b AND a <> n AND b <> n
+                         } as betweenness_approximation
                     RETURN n.id as node_id,
                            betweenness_approximation as betweenness_centrality
                     ORDER BY betweenness_approximation DESC
                 """, graph_name=graph_name)
-                
-                betweenness_data = {record["node_id"]: record["betweenness_centrality"] 
+
+                betweenness_data = {record["node_id"]: record["betweenness_centrality"]
                                   for record in betweenness_result}
-                
-                # Calculate closeness centrality approximation
+
+                # Calculate closeness centrality with proper NULL handling
                 closeness_result = session.run("""
                     MATCH (n:KGNode {graph_name: $graph_name})
-                    OPTIONAL MATCH path = (n)-[*]-(other:KGNode {graph_name: $graph_name})
-                    WHERE n <> other
-                    WITH n, avg(length(path)) as avg_distance
+                    CALL (n) {
+                        MATCH path = (n)-[:RELATED*]-(other:KGNode {graph_name: $graph_name})
+                        WHERE n <> other
+                        RETURN avg(length(path)) as avg_distance
+                    }
+                    WITH n, avg_distance
+                    WHERE avg_distance IS NOT NULL AND avg_distance > 0
                     RETURN n.id as node_id,
-                           CASE WHEN avg_distance > 0 THEN 1.0/avg_distance ELSE 0 END as closeness_centrality
+                           1.0/avg_distance as closeness_centrality
                     ORDER BY closeness_centrality DESC
                 """, graph_name=graph_name)
-                
-                closeness_data = {record["node_id"]: record["closeness_centrality"] 
+
+                closeness_data = {record["node_id"]: record["closeness_centrality"]
                                 for record in closeness_result}
-                
+
                 # Combine all centrality metrics
                 centrality_results = []
                 for record in degree_data:
@@ -196,31 +203,35 @@ class Neo4jConnection:
                         "betweenness_centrality": betweenness_data.get(node_id, 0),
                         "closeness_centrality": closeness_data.get(node_id, 0.0)
                     })
-                
+
                 return centrality_results, None
-                
+
         except Exception as e:
             return [], f"Centrality analysis failed: {e}"
     
     def analyze_graph_communities(self, graph_name):
-        """Detect communities using simple clustering based on connectivity"""
+        """Detect communities using simple clustering based on connectivity with modern Cypher"""
         try:
             with self.driver.session() as session:
-                # Simple community detection based on connected components
+                # Modern community detection using CALL subqueries for connected components
                 result = session.run("""
                     MATCH (n:KGNode {graph_name: $graph_name})
-                    OPTIONAL MATCH path = (n)-[:RELATED*]-(connected:KGNode {graph_name: $graph_name})
-                    WITH n, collect(DISTINCT connected.id) + [n.id] as component
+                    CALL (n) {
+                        MATCH path = (n)-[:RELATED*]-(connected:KGNode {graph_name: $graph_name})
+                        RETURN collect(DISTINCT connected.id) as connected_ids
+                    }
+                    WITH n, connected_ids + [n.id] as component
                     WITH n, component, size(component) as component_size
+                    WHERE component_size IS NOT NULL
                     ORDER BY component_size DESC, n.id
                     WITH collect({node: n, component: component}) as all_components
-                    
+
                     // Assign community IDs based on component membership
                     UNWIND range(0, size(all_components)-1) as index
-                    WITH all_components[index].node as node, 
+                    WITH all_components[index].node as node,
                          all_components[index].component as component,
                          index % 10 as communityId
-                    
+
                     RETURN node.id as nodeId,
                            node.label as label,
                            communityId
@@ -256,41 +267,47 @@ class Neo4jConnection:
             return [], f"Community detection failed: {e}"
     
     def find_shortest_paths(self, graph_name, source_node=None, target_node=None):
-        """Find shortest paths between nodes"""
+        """Find shortest paths between nodes using modern Cypher"""
         try:
             with self.driver.session() as session:
                 if source_node and target_node:
-                    # Find specific shortest path using basic Cypher
+                    # Find specific shortest path using modern Cypher
                     result = session.run("""
                         MATCH path = shortestPath(
                             (source:KGNode {id: $source, graph_name: $graph_name})
-                            -[*]->
+                            -[:RELATED*]->
                             (target:KGNode {id: $target, graph_name: $graph_name})
                         )
                         RETURN [node in nodes(path) | node.id] as path_nodes,
                                [rel in relationships(path) | rel.label] as path_edges,
                                length(path) as totalCost
                     """, source=source_node, target=target_node, graph_name=graph_name)
-                    
+
                     paths = [record.data() for record in result]
                     return paths, None
                 else:
-                    # Get all-pairs shortest paths summary
+                    # Get all-pairs shortest paths summary with modern subquery pattern
                     result = session.run("""
                         MATCH (n:KGNode {graph_name: $graph_name})
                         WITH count(n) as nodeCount
-                        MATCH path = (a:KGNode {graph_name: $graph_name})-[:RELATED*]-(b:KGNode {graph_name: $graph_name})
-                        WHERE a.id < b.id
-                        WITH nodeCount, 
+
+                        CALL {
+                            MATCH path = (a:KGNode {graph_name: $graph_name})-[:RELATED*]-(b:KGNode {graph_name: $graph_name})
+                            WHERE a.id < b.id
+                            RETURN path
+                        }
+
+                        WITH nodeCount,
                              avg(length(path)) as avgPathLength,
                              max(length(path)) as maxPathLength,
                              min(length(path)) as minPathLength
+                        WHERE avgPathLength IS NOT NULL
                         RETURN nodeCount, avgPathLength, maxPathLength, minPathLength
                     """, graph_name=graph_name)
-                    
+
                     summary = [record.data() for record in result]
                     return summary, None
-                    
+
         except Exception as e:
             return [], f"Shortest path analysis failed: {e}"
 
@@ -603,62 +620,250 @@ def generate_vehicle_lifecycle_graph():
     return sample_nodes, sample_edges
 
 def main():
-    st.title("🕸️ Knowledge Graph Generator")
-    st.markdown("Generate interactive knowledge graphs using Claude AI and Neo4j")
+    # Enhanced CSS for modern, clean styling
+    st.markdown("""
+    <style>
+    /* Hide Streamlit branding and menu */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
     
-    # Sidebar for configuration
+    /* Clean main container */
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 1200px;
+    }
+    
+    /* Modern header styling */
+    .main-header {
+        font-size: 2.8rem;
+        font-weight: 700;
+        color: #1a202c;
+        margin-bottom: 0.5rem;
+        text-align: center;
+        letter-spacing: -0.02em;
+    }
+    .sub-header {
+        font-size: 1.2rem;
+        color: #4a5568;
+        text-align: center;
+        margin-bottom: 3rem;
+        font-weight: 400;
+    }
+    
+    /* Clean sidebar styling */
+    .css-1d391kg {
+        background-color: #f7fafc;
+        border-right: 1px solid #e2e8f0;
+    }
+    
+    .css-1d391kg .stMarkdown h2,
+    .css-1d391kg .stMarkdown h3 {
+        color: #2d3748;
+        font-weight: 600;
+        margin-bottom: 1rem;
+    }
+    
+    /* Modern tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 4px;
+        background-color: #f7fafc;
+        padding: 6px;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 48px;
+        padding: 0 24px;
+        background-color: transparent;
+        border-radius: 8px;
+        border: none;
+        color: #4a5568;
+        font-weight: 500;
+        font-size: 0.95rem;
+        transition: all 0.2s ease;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        background-color: #edf2f7;
+        color: #2d3748;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #4299e1;
+        color: white;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+    
+    /* Card styling for sections */
+    .content-card {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        margin-bottom: 1rem;
+    }
+    
+    /* Clean button styling */
+    .stButton > button {
+        border-radius: 8px;
+        border: 1px solid #e2e8f0;
+        background-color: #ffffff;
+        color: #2d3748;
+        font-weight: 500;
+        height: 2.75rem;
+        transition: all 0.2s ease;
+        font-size: 0.95rem;
+    }
+    .stButton > button:hover {
+        background-color: #f7fafc;
+        border-color: #4299e1;
+        transform: translateY(-1px);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    .stButton > button[kind="primary"] {
+        background-color: #4299e1;
+        color: white;
+        border-color: #4299e1;
+    }
+    .stButton > button[kind="primary"]:hover {
+        background-color: #3182ce;
+        border-color: #3182ce;
+    }
+    .stButton > button[kind="secondary"] {
+        background-color: #68d391;
+        color: white;
+        border-color: #68d391;
+    }
+    .stButton > button[kind="secondary"]:hover {
+        background-color: #48bb78;
+        border-color: #48bb78;
+    }
+    
+    /* Clean input styling */
+    .stTextInput > div > div > input,
+    .stTextArea > div > div > textarea,
+    .stSelectbox > div > div > select {
+        border-radius: 8px;
+        border: 1px solid #e2e8f0;
+        background-color: #ffffff;
+    }
+    
+    /* Success/error message styling */
+    .stSuccess {
+        background-color: #f0fff4;
+        border-left: 4px solid #48bb78;
+        border-radius: 8px;
+    }
+    .stError {
+        background-color: #fff5f5;
+        border-left: 4px solid #f56565;
+        border-radius: 8px;
+    }
+    .stWarning {
+        background-color: #fffbeb;
+        border-left: 4px solid #ed8936;
+        border-radius: 8px;
+    }
+    .stInfo {
+        background-color: #f0f8ff;
+        border-left: 4px solid #4299e1;
+        border-radius: 8px;
+    }
+    
+    /* Metric styling */
+    [data-testid="metric-container"] {
+        background-color: #f7fafc;
+        border: 1px solid #e2e8f0;
+        padding: 1rem;
+        border-radius: 8px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+    
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        background-color: #f7fafc;
+        border-radius: 8px;
+        border: 1px solid #e2e8f0;
+        font-weight: 500;
+    }
+    
+    /* Visualization container */
+    .viz-container {
+        background: white;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+        padding: 1rem;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Clean header with icon
+    st.markdown('<h1 class="main-header">🕸️ Knowledge Graph Generator</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Create interactive knowledge graphs with AI-powered generation and advanced analytics</p>', unsafe_allow_html=True)
+    
+    # Cleaner, collapsible sidebar
     with st.sidebar:
-        st.header("🔧 Configuration")
+        st.markdown("### ⚙️ Configuration")
         
-        # Neo4j Connection
-        st.subheader("Neo4j Database")
-        neo4j_uri = st.text_input("Neo4j URI", value="bolt://neo4j:7687")
-        neo4j_user = st.text_input("Username", value="neo4j")
-        neo4j_password = st.text_input("Password", type="password")
+        # Connection status with clearer messaging
+        if st.session_state.neo4j_connected:
+            st.success("✅ Neo4j Connected")
+        else:
+            st.warning("⚡ Database Setup Required")
         
-        if st.button("Test Connection"):
-            if neo4j_uri and neo4j_user and neo4j_password:
-                conn = Neo4jConnection(neo4j_uri, neo4j_user, neo4j_password)
-                if conn.test_connection():
-                    st.success("✅ Connected to Neo4j!")
-                    st.session_state.neo4j_connected = True
-                    st.session_state.neo4j_conn = conn
+        with st.expander("🗄️ Database Setup", expanded=not st.session_state.neo4j_connected):
+            neo4j_uri = st.text_input("Neo4j URI", value="bolt://neo4j:7687", key="neo4j_uri")
+            neo4j_user = st.text_input("Username", value="neo4j", key="neo4j_user")
+            neo4j_password = st.text_input("Password", type="password", key="neo4j_password")
+            
+            if st.button("🔗 Connect", use_container_width=True):
+                if neo4j_uri and neo4j_user and neo4j_password:
+                    conn = Neo4jConnection(neo4j_uri, neo4j_user, neo4j_password)
+                    if conn.test_connection():
+                        st.success("Connected successfully!")
+                        st.session_state.neo4j_connected = True
+                        st.session_state.neo4j_conn = conn
+                        st.rerun()
+                    else:
+                        st.session_state.neo4j_connected = False
                 else:
-                    st.session_state.neo4j_connected = False
-            else:
-                st.error("Please fill in all connection details")
+                    st.error("Fill in all fields")
         
-        # Claude API Configuration
-        st.subheader("Claude AI")
-        claude_api_key = st.text_input("Claude API Key", type="password")
-        if claude_api_key:
-            os.environ["ANTHROPIC_API_KEY"] = claude_api_key
-            st.success("✅ Claude API key set")
+        with st.expander("🤖 AI Configuration", expanded=False):
+            claude_api_key = st.text_input("Claude API Key", type="password", key="claude_key")
+            if claude_api_key:
+                os.environ["ANTHROPIC_API_KEY"] = claude_api_key
+                st.success("✅ API key configured")
         
-        # Sample Data Generation
-        st.subheader("📋 Sample Data")
+        # Streamlined Quick Start
+        st.markdown("---")
+        st.markdown("### 🚀 Quick Start")
+        
         sample_type = st.selectbox(
-            "Choose sample graph:",
-            ["AI/Technology", "Vehicle Lifecycle Management"],
+            "Choose sample:",
+            ["AI/Technology", "Vehicle Lifecycle"],
             key="sample_type"
         )
         
-        if st.button("🎯 Load Sample Graph", use_container_width=True):
+        if st.button("📥 Load Sample", use_container_width=True, type="secondary"):
             if sample_type == "AI/Technology":
                 sample_nodes, sample_edges = generate_sample_graph()
-            else:  # Vehicle Lifecycle Management
+            else:
                 sample_nodes, sample_edges = generate_vehicle_lifecycle_graph()
             
             st.session_state.nodes = sample_nodes
             st.session_state.edges = sample_edges
-            st.success(f"✅ {sample_type} sample graph loaded! {len(sample_nodes)} nodes, {len(sample_edges)} edges")
+            st.success(f"Loaded {len(sample_nodes)} nodes, {len(sample_edges)} edges")
+            st.rerun()
     
     # Main content area
     col1, col2 = st.columns([1, 2])
     
     with col1:
         # Create tabs for better organization
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["🚀 Generate", "📂 Load", "✏️ Edit", "📊 Analytics", "💾 Export"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Generate", "Load", "Edit", "Analytics", "Export"])
         
         with tab1:
             st.subheader("AI Graph Generation")
@@ -670,7 +875,7 @@ def main():
                 height=150
             )
             
-            if st.button("🚀 Generate Graph", type="primary", use_container_width=True):
+            if st.button("Generate Graph", type="primary", use_container_width=True):
                 if user_input:
                     # Check if Claude API key is available
                     api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -685,7 +890,7 @@ def main():
                             elif nodes and edges:
                                 st.session_state.nodes = nodes
                                 st.session_state.edges = edges
-                                st.success(f"Graph generated successfully! Created {len(nodes)} nodes and {len(edges)} relationships.")
+                                st.success(f"Graph generated! Created {len(nodes)} nodes and {len(edges)} relationships.")
                             else:
                                 st.warning("No graph data was generated. Please try a different description.")
                 else:
@@ -713,7 +918,7 @@ def main():
                         placeholder="Choose a graph to load..."
                     )
                     
-                    if selected_option and st.button("📥 Load Graph", use_container_width=True):
+                    if selected_option and st.button("Load Graph", use_container_width=True):
                         selected_index = graph_options.index(selected_option)
                         selected_graph_name = graph_names[selected_index]
                         
@@ -725,7 +930,7 @@ def main():
                             elif nodes:
                                 st.session_state.nodes = nodes
                                 st.session_state.edges = edges
-                                st.success(f"✅ Loaded graph '{selected_graph_name}' successfully!")
+                                st.success(f"Loaded graph '{selected_graph_name}' successfully!")
                                 st.rerun()
                             else:
                                 st.warning("No data found for this graph")
@@ -746,7 +951,7 @@ def main():
                 with col_stat2:
                     st.metric("Edges", len(st.session_state.edges))
                 
-                if st.button("🗑️ Clear Current Graph", use_container_width=True):
+                if st.button("Clear Current Graph", use_container_width=True):
                     st.session_state.nodes = []
                     st.session_state.edges = []
                     st.success("Graph cleared!")
@@ -758,7 +963,7 @@ def main():
             st.subheader("Manual Graph Editing")
             
             # Add Node Section
-            with st.expander("➕ Add New Node", expanded=True):
+            with st.expander("Add New Node", expanded=True):
                 col_node1, col_node2 = st.columns(2)
                 with col_node1:
                     new_node_id = st.text_input("Node ID", placeholder="unique_identifier")
@@ -766,7 +971,7 @@ def main():
                 with col_node2:
                     new_node_color = st.color_picker("Node Color", "#FF6B6B")
                 
-                if st.button("➕ Add Node", use_container_width=True):
+                if st.button("Add Node", use_container_width=True):
                     if not new_node_id.strip() or not new_node_label.strip():
                         st.warning("Please provide both Node ID and Label")
                     elif any(node.id == new_node_id.strip() for node in st.session_state.nodes):
@@ -778,11 +983,11 @@ def main():
                         
                         new_node = Node(id=clean_id, label=clean_label, color=new_node_color)
                         st.session_state.nodes.append(new_node)
-                        st.success(f"✅ Added node '{clean_label}'")
+                        st.success(f"Added node '{clean_label}'")
                         st.rerun()
             
             # Add Edge Section
-            with st.expander("🔗 Add New Edge"):
+            with st.expander("Add New Edge"):
                 if len(st.session_state.nodes) >= 2:
                     node_options = [f"{node.id} ({node.label})" for node in st.session_state.nodes]
                     node_ids = [node.id for node in st.session_state.nodes]
@@ -797,7 +1002,7 @@ def main():
                     
                     edge_label = st.text_input("Relationship Label", placeholder="describes the relationship")
                     
-                    if st.button("🔗 Add Edge", use_container_width=True):
+                    if st.button("Add Edge", use_container_width=True):
                         if not source_id or not target_id:
                             st.warning("Please select both source and target nodes")
                         elif source_id == target_id:
@@ -811,14 +1016,14 @@ def main():
                             clean_label = edge_label.strip().replace('"', '').replace("'", "")
                             new_edge = Edge(source=source_id, target=target_id, label=clean_label)
                             st.session_state.edges.append(new_edge)
-                            st.success(f"✅ Added edge: {source_id} → {target_id}")
+                            st.success(f"Added edge: {source_id} → {target_id}")
                             st.rerun()
                 else:
                     st.info("Add at least 2 nodes before creating edges")
             
             # Edit/Delete Section
             if st.session_state.nodes:
-                with st.expander("✏️ Edit & Delete"):
+                with st.expander("Edit & Delete"):
                     st.subheader("Edit Nodes")
                     
                     # Select node to edit
@@ -837,26 +1042,26 @@ def main():
                         
                         col_btn1, col_btn2 = st.columns(2)
                         with col_btn1:
-                            if st.button("💾 Update Node", use_container_width=True):
+                            if st.button("Update Node", use_container_width=True):
                                 if edit_label.strip():
                                     st.session_state.nodes[selected_node_index] = Node(
                                         id=selected_node.id, 
                                         label=edit_label.strip(), 
                                         color=edit_color
                                     )
-                                    st.success(f"✅ Updated node '{selected_node.id}'")
+                                    st.success(f"Updated node '{selected_node.id}'")
                                     st.rerun()
                                 else:
                                     st.warning("Label cannot be empty")
                         
                         with col_btn2:
-                            if st.button("🗑️ Delete Node", use_container_width=True):
+                            if st.button("Delete Node", use_container_width=True):
                                 # Remove the node
                                 st.session_state.nodes = [n for n in st.session_state.nodes if n.id != selected_node.id]
                                 # Remove all edges connected to this node
                                 st.session_state.edges = [e for e in st.session_state.edges 
                                                         if e.source != selected_node.id and e.to != selected_node.id]
-                                st.success(f"✅ Deleted node '{selected_node.id}' and its connections")
+                                st.success(f"Deleted node '{selected_node.id}' and its connections")
                                 st.rerun()
                     
                     st.divider()
@@ -866,16 +1071,16 @@ def main():
                         edge_options = [f"{edge.source} → {edge.to} ({edge.label})" for edge in st.session_state.edges]
                         selected_edge_option = st.selectbox("Select edge to delete:", edge_options, key="delete_edge_select")
                         
-                        if selected_edge_option and st.button("🗑️ Delete Edge", use_container_width=True):
+                        if selected_edge_option and st.button("Delete Edge", use_container_width=True):
                             selected_edge_index = edge_options.index(selected_edge_option)
                             deleted_edge = st.session_state.edges[selected_edge_index]
                             st.session_state.edges = [e for i, e in enumerate(st.session_state.edges) if i != selected_edge_index]
-                            st.success(f"✅ Deleted edge: {deleted_edge.source} → {deleted_edge.to}")
+                            st.success(f"Deleted edge: {deleted_edge.source} → {deleted_edge.to}")
                             st.rerun()
                     else:
                         st.info("No edges to delete")
             else:
-                st.info("🎯 Start by adding nodes to begin editing your graph")
+                st.info("Start by adding nodes to begin editing your graph")
         
         with tab4:
             st.subheader("Graph Analysis")
@@ -918,7 +1123,7 @@ def main():
                                 with col_path2:
                                     target_node = st.selectbox("Target Node", current_nodes, key="path_target")
                         
-                        if st.button("🔍 Run Analysis", use_container_width=True):
+                        if st.button("Run Analysis", use_container_width=True):
                             with st.spinner(f"Running {analysis_type.lower()}..."):
                                 
                                 if analysis_type == "Centrality Analysis":
@@ -927,7 +1132,7 @@ def main():
                                     if error:
                                         st.error(f"Analysis failed: {error}")
                                     elif results:
-                                        st.success("✅ Centrality analysis complete!")
+                                        st.success("Centrality analysis complete!")
                                         
                                         # Create DataFrame for better display
                                         df = pd.DataFrame(results)
@@ -970,7 +1175,7 @@ def main():
                                     if error:
                                         st.error(f"Analysis failed: {error}")
                                     elif results:
-                                        st.success("✅ Community detection complete!")
+                                        st.success("Community detection complete!")
                                         
                                         # Create DataFrame
                                         df = pd.DataFrame(results)
@@ -1014,7 +1219,7 @@ def main():
                                     if error:
                                         st.error(f"Path analysis failed: {error}")
                                     elif results:
-                                        st.success("✅ Path analysis complete!")
+                                        st.success("Path analysis complete!")
                                         
                                         if 'path_type' in locals() and path_type == "Specific Path":
                                             st.subheader(f"🛤️ Shortest Path: {source_node} → {target_node}")
@@ -1037,23 +1242,23 @@ def main():
                                     else:
                                         st.warning("No path data found")
                 else:
-                    st.info("📊 Save a graph to Neo4j first to enable advanced analytics")
+                    st.info("Save a graph to Neo4j first to enable advanced analytics")
             elif not st.session_state.neo4j_connected:
-                st.warning("🔌 Connect to Neo4j to access graph analytics")
+                st.warning("Connect to Neo4j to access graph analytics")
             else:
-                st.info("📈 Generate or load a graph first to access analytics")
+                st.info("Generate or load a graph first to access analytics")
         
         with tab5:
             if st.session_state.nodes:
                 # Save to Neo4j section
-                st.subheader("💾 Save to Neo4j")
+                st.subheader("Save to Neo4j")
                 
                 graph_name = st.text_input("Graph Name", value="my_knowledge_graph")
                 graph_description = st.text_area("Description", 
                                                 placeholder="Brief description of this knowledge graph",
                                                 height=70)
                 
-                if st.button("💾 Save to Neo4j", use_container_width=True):
+                if st.button("Save to Neo4j", use_container_width=True):
                     if not st.session_state.neo4j_connected:
                         st.warning("Please connect to Neo4j first")
                     elif not graph_name.strip():
@@ -1069,13 +1274,13 @@ def main():
                             )
                             
                             if success:
-                                st.success(f"✅ Graph '{graph_name}' saved successfully!")
+                                st.success(f"Graph '{graph_name}' saved successfully!")
                             else:
-                                st.error(f"❌ Failed to save graph: {error}")
+                                st.error(f"Failed to save graph: {error}")
                 
                 # Export section
                 st.divider()
-                st.subheader("📤 Export Graph")
+                st.subheader("Export Graph")
                 
                 export_format = st.selectbox(
                     "Select export format:",
@@ -1089,7 +1294,7 @@ def main():
                     help="Name for the exported file(s)"
                 )
                 
-                if st.button("📥 Export Graph", type="secondary", use_container_width=True):
+                if st.button("Export Graph", type="secondary", use_container_width=True):
                     if not export_name.strip():
                         st.warning("Please enter a filename")
                     else:
@@ -1099,13 +1304,13 @@ def main():
                             # JSON Export
                             json_data = export_graph_json(st.session_state.nodes, st.session_state.edges, filename)
                             st.download_button(
-                                label="💾 Download JSON",
+                                label="Download JSON",
                                 data=json_data,
                                 file_name=f"{filename}.json",
                                 mime="application/json",
                                 use_container_width=True
                             )
-                            st.success(f"✅ JSON export ready for download!")
+                            st.success(f"JSON export ready for download!")
                             
                         elif export_format == "CSV (Nodes & Edges)":
                             # CSV Export
@@ -1118,7 +1323,7 @@ def main():
                             col_csv1, col_csv2 = st.columns(2)
                             with col_csv1:
                                 st.download_button(
-                                    label="💾 Nodes CSV",
+                                    label="Nodes CSV",
                                     data=nodes_csv,
                                     file_name=f"{filename}_nodes.csv",
                                     mime="text/csv",
@@ -1126,33 +1331,47 @@ def main():
                                 )
                             with col_csv2:
                                 st.download_button(
-                                    label="💾 Edges CSV",
+                                    label="Edges CSV",
                                     data=edges_csv,
                                     file_name=f"{filename}_edges.csv",
                                     mime="text/csv",
                                     use_container_width=True
                                 )
-                            st.success(f"✅ CSV exports ready for download!")
+                            st.success(f"CSV exports ready for download!")
                             
                         elif export_format == "GraphML":
                             # GraphML Export
                             graphml_data = export_graph_graphml(st.session_state.nodes, st.session_state.edges, filename)
                             st.download_button(
-                                label="💾 Download GraphML",
+                                label="Download GraphML",
                                 data=graphml_data,
                                 file_name=f"{filename}.graphml",
                                 mime="application/xml",
                                 use_container_width=True
                             )
-                            st.success(f"✅ GraphML export ready for download!")
+                            st.success(f"GraphML export ready for download!")
             else:
-                st.info("📊 Generate or load a graph first to access save and export options.")
+                st.info("Generate or load a graph first to access save and export options.")
     
     with col2:
-        st.header("🌐 Knowledge Graph Visualization")
+        # Clean visualization section with container
+        st.markdown('<div class="viz-container">', unsafe_allow_html=True)
+        st.markdown("### 🌐 Interactive Visualization")
         
         if st.session_state.nodes:
-            # Graph configuration
+            # Display graph metrics in a clean row
+            metric_col1, metric_col2, metric_col3 = st.columns(3)
+            with metric_col1:
+                st.metric("Nodes", len(st.session_state.nodes))
+            with metric_col2:
+                st.metric("Edges", len(st.session_state.edges))
+            with metric_col3:
+                connectivity = len(st.session_state.edges) / len(st.session_state.nodes) if st.session_state.nodes else 0
+                st.metric("Connectivity", f"{connectivity:.1f}")
+            
+            st.markdown("---")
+            
+            # Enhanced graph configuration
             config = Config(
                 width=800,
                 height=600,
@@ -1161,7 +1380,7 @@ def main():
                 hierarchical=False,
             )
             
-            # Display the graph
+            # Display the graph with better error handling
             try:
                 return_value = agraph(
                     nodes=st.session_state.nodes,
@@ -1169,29 +1388,36 @@ def main():
                     config=config
                 )
                 
-                # Display selected node info
+                # Clean selected node display
                 if return_value:
-                    st.subheader("Selected Node Information")
-                    try:
-                        # Handle the return value more safely
-                        if isinstance(return_value, dict):
-                            st.json(return_value)
-                        elif isinstance(return_value, str):
-                            # Try to parse if it's a JSON string
-                            import json
-                            parsed_value = json.loads(return_value)
-                            st.json(parsed_value)
-                        else:
-                            st.write("Selected:", return_value)
-                    except json.JSONDecodeError:
-                        st.write("Selected item:", str(return_value))
-                    except Exception as e:
-                        st.write("Selection data:", str(return_value))
+                    with st.expander("🔍 Node Details", expanded=True):
+                        try:
+                            if isinstance(return_value, dict):
+                                st.json(return_value)
+                            elif isinstance(return_value, str):
+                                import json
+                                parsed_value = json.loads(return_value)
+                                st.json(parsed_value)
+                            else:
+                                st.write("**Selected:**", return_value)
+                        except json.JSONDecodeError:
+                            st.write("**Selection:**", str(return_value))
+                        except Exception:
+                            st.write("**Data:**", str(return_value))
             except Exception as e:
-                st.error(f"Error displaying graph: {e}")
-                st.info("Try refreshing the page or regenerating the graph")
+                st.error(f"Visualization Error: {e}")
+                st.info("💡 Try refreshing or regenerating the graph")
         else:
-            st.info("👆 Generate a graph to see the visualization here")
+            # Clean empty state
+            st.markdown("""
+            <div style="text-align: center; padding: 4rem 2rem; color: #718096;">
+                <div style="font-size: 4rem; margin-bottom: 1rem;">🎯</div>
+                <h3 style="color: #4a5568; margin-bottom: 1rem;">Ready to Generate</h3>
+                <p>Create your first knowledge graph using AI generation or load a sample to get started.</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown('</div>', unsafe_allow_html=True)
     
 
 if __name__ == "__main__":
